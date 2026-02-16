@@ -1,0 +1,7 @@
+{
+  "name": "Smansa AI - Asisten Guru Virtual",
+  "description": "Asisten bimbingan belajar virtual untuk siswa Smansa, menyediakan interaksi suara langsung dengan karakter Guru profesional yang bijaksana.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
