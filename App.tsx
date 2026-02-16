@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { GoogleGenAI, Modality } from '@google/genai';
 import { ConnectionStatus } from './types';
 import { decode, decodeAudioData, createPcmBlob } from './services/audioService';
@@ -19,21 +19,14 @@ const App: React.FC = () => {
   const nextStartTimeRef = useRef<number>(0);
   const recognitionRef = useRef<any>(null);
 
-  // Database Lengkap SMA Negeri 1 Tual
-  const teacherDatabase = `
-    Daftar Personil SMA Negeri 1 Tual:
-    1. Fata Tukloy, S.Pd. M.Pd.Si (Kepala Sekolah, Guru Fisika)
-    ... (Data lainnya tetap ada di sistem)
-  `;
-
   const handleStop = useCallback(() => {
     if (sessionRef.current) {
       sessionRef.current.close();
       sessionRef.current = null;
     }
     if (audioContextRef.current) {
-      audioContextRef.current.input.close();
-      audioContextRef.current.output.close();
+      audioContextRef.current.input.close().catch(() => {});
+      audioContextRef.current.output.close().catch(() => {});
       audioContextRef.current.input = null as any;
       audioContextRef.current.output = null as any;
     }
@@ -55,14 +48,8 @@ const App: React.FC = () => {
       setStatus(ConnectionStatus.CONNECTING);
       setErrorMsg(null);
 
-      // MENGGUNAKAN VITE_API_KEY UNTUK VERCEL/VITE
-      const apiKey = (import.meta as any).env?.VITE_API_KEY || process.env.API_KEY;
-      
-      if (!apiKey) {
-        throw new Error("API Key tidak ditemukan. Pastikan sudah diatur di Environment Variables.");
-      }
-
-      const ai = new GoogleGenAI({ apiKey });
+      // Sesuai instruksi: Mengambil API Key eksklusif dari process.env.API_KEY
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -74,11 +61,10 @@ const App: React.FC = () => {
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          thinkingConfig: { thinkingBudget: 0 },
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
-          systemInstruction: `Anda adalah Ibu Guru Smansa AI di SMA Negeri 1 Tual. Jawablah secepat mungkin, bijaksana, dan panggil siswa dengan Nak atau Ananda.`,
+          systemInstruction: 'Anda adalah Ibu Guru Smansa AI di SMA Negeri 1 Tual. Jawablah secepat mungkin, bijaksana, dan panggil siswa dengan Nak atau Ananda. Berikan penjelasan yang mendidik dan suportif.',
         },
         callbacks: {
           onopen: () => {
@@ -91,7 +77,7 @@ const App: React.FC = () => {
               if (sessionRef.current) {
                 const inputData = e.inputBuffer.getChannelData(0);
                 const pcmBlob = createPcmBlob(inputData);
-                session.sendRealtimeInput({ media: pcmBlob });
+                sessionRef.current.sendRealtimeInput({ media: pcmBlob });
               }
             };
             source.connect(scriptProcessor);
@@ -124,7 +110,7 @@ const App: React.FC = () => {
           onerror: (e) => {
             console.error("Gemini Error:", e);
             setStatus(ConnectionStatus.ERROR);
-            setErrorMsg("Koneksi terganggu. Pastikan API Key benar.");
+            setErrorMsg("Terjadi kesalahan koneksi. Silakan coba lagi.");
           },
           onclose: () => {
             handleStop();
@@ -137,7 +123,7 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error(err);
       setStatus(ConnectionStatus.ERROR);
-      setErrorMsg(err.message || "Gagal menghubungi Ibu Guru Smansa AI.");
+      setErrorMsg("Gagal mengakses mikrofon atau menghubungkan ke server.");
       startWakeWordDetection();
     }
   };
@@ -151,55 +137,87 @@ const App: React.FC = () => {
     recognition.lang = 'id-ID';
     recognition.onresult = (event: any) => {
       const transcript = Array.from(event.results).map((result: any) => result[0].transcript).join('').toLowerCase();
-      if (transcript.includes("hai guru")) handleStart();
+      if (transcript.includes("halo guru") || transcript.includes("ibu guru")) {
+        handleStart();
+      }
     };
-    recognition.onend = () => { if (status === ConnectionStatus.DISCONNECTED) recognition.start(); };
-    try { recognition.start(); recognitionRef.current = recognition; setIsWakeWordReady(true); } catch(e) {}
+    recognition.onend = () => { 
+      if (status === ConnectionStatus.DISCONNECTED) {
+        try { recognition.start(); } catch(e) {}
+      }
+    };
+    try { 
+      recognition.start(); 
+      recognitionRef.current = recognition; 
+      setIsWakeWordReady(true); 
+    } catch(e) {}
   }, [status]);
 
-  const activateSystem = () => {
-    startWakeWordDetection();
-    setErrorMsg(null);
-  };
-
   return (
-    <div className="h-screen flex flex-col items-center bg-black text-white selection:bg-pink-900/50 overflow-hidden relative font-['Plus_Jakarta_Sans']">
+    <div className="min-h-screen flex flex-col items-center bg-black text-white selection:bg-pink-900/50 overflow-hidden relative font-['Plus_Jakarta_Sans']">
       <NeuralNetworkBackground />
-      <header className="w-full max-w-6xl px-6 py-4 flex justify-between items-center z-50">
+      
+      <header className="w-full max-w-6xl px-6 py-6 flex justify-between items-center z-50">
         <div className="flex items-center gap-3">
-          <div className="bg-pink-600 p-2 rounded-xl text-white shadow-lg shadow-pink-500/20">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="bg-gradient-to-br from-pink-600 to-rose-600 p-2.5 rounded-xl text-white shadow-lg shadow-pink-500/20">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           </div>
-          <h1 className="font-black text-xl tracking-tighter uppercase italic">SMANSA <span className="text-pink-500">AI</span></h1>
+          <h1 className="font-extrabold text-2xl tracking-tighter uppercase italic">
+            SMANSA <span className="text-pink-500">AI</span>
+          </h1>
         </div>
-        <div className={`px-3 py-1.5 rounded-lg text-[9px] font-black tracking-widest border transition-all ${
-          status === ConnectionStatus.CONNECTED ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-slate-800/50 text-slate-400 border-slate-700'
+        
+        <div className={`px-4 py-2 rounded-full text-[10px] font-black tracking-widest border backdrop-blur-md transition-all duration-500 ${
+          status === ConnectionStatus.CONNECTED 
+            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.2)]' 
+            : 'bg-slate-800/50 text-slate-400 border-slate-700'
         }`}>
-          {status === ConnectionStatus.CONNECTED ? '• ONLINE' : status}
+          {status === ConnectionStatus.CONNECTED ? '● SISTEM AKTIF' : status}
         </div>
       </header>
 
-      <main className="flex-1 w-full max-w-4xl flex flex-col items-center justify-center px-4 z-10">
-        <div className="w-full bg-slate-900/40 backdrop-blur-3xl rounded-[3rem] border border-white/5 p-8 flex flex-col items-center shadow-2xl">
+      <main className="flex-1 w-full max-w-4xl flex flex-col items-center justify-center px-4 z-10 py-12">
+        <div className="w-full bg-slate-900/30 backdrop-blur-3xl rounded-[4rem] border border-white/5 p-10 flex flex-col items-center shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-pink-500/50 to-transparent"></div>
+          
           <TeacherAvatar isSpeaking={isSpeaking} isListening={isListening} status={status} />
-          <div className="mt-8 w-full max-w-sm">
+          
+          <div className="mt-12 w-full max-w-xs space-y-4">
             {status === ConnectionStatus.DISCONNECTED ? (
-              <button onClick={isWakeWordReady ? handleStart : activateSystem} className="w-full py-5 bg-gradient-to-r from-pink-600 to-rose-600 text-white font-black rounded-2xl shadow-xl active:scale-95 transition-all uppercase tracking-tight">
-                {isWakeWordReady ? 'MULAI BICARA' : 'AKTIFKAN SUARA'}
+              <button 
+                onClick={isWakeWordReady ? handleStart : () => { startWakeWordDetection(); }} 
+                className="w-full py-5 bg-gradient-to-r from-pink-600 to-rose-600 text-white font-black rounded-2xl shadow-xl shadow-pink-600/20 active:scale-95 hover:scale-[1.02] transition-all uppercase tracking-wider text-sm"
+              >
+                {isWakeWordReady ? 'Mulai Konsultasi' : 'Aktifkan Mikrofon'}
               </button>
             ) : (
-              <button onClick={handleStop} className="w-full py-5 bg-white text-black font-black rounded-2xl active:scale-95 transition-all uppercase tracking-tight">
-                BERHENTI
+              <button 
+                onClick={handleStop} 
+                className="w-full py-5 bg-white text-black font-black rounded-2xl active:scale-95 hover:bg-slate-100 transition-all uppercase tracking-wider text-sm"
+              >
+                Selesaikan Sesi
               </button>
             )}
-            {errorMsg && <p className="mt-4 text-rose-400 text-[10px] font-bold text-center bg-rose-500/10 py-2 rounded-lg border border-rose-500/20">{errorMsg}</p>}
+            
+            {errorMsg && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-center">
+                <p className="text-rose-400 text-[10px] font-bold uppercase tracking-tight">{errorMsg}</p>
+              </div>
+            )}
+            
+            <p className="text-slate-500 text-[9px] text-center font-medium uppercase tracking-[0.1em]">
+              {status === ConnectionStatus.CONNECTED ? 'Ibu Guru sedang mendengarkan...' : 'Gunakan suara untuk berinteraksi'}
+            </p>
           </div>
         </div>
       </main>
-      <footer className="w-full px-8 py-4 text-center z-50">
-        <p className="text-[8px] font-black tracking-[0.5em] text-pink-500/40 uppercase italic">SMA NEGERI 1 TUAL • KOTA TUAL</p>
+
+      <footer className="w-full px-8 py-6 text-center z-50">
+        <p className="text-[9px] font-bold tracking-[0.6em] text-white/20 uppercase">
+          SMA NEGERI 1 TUAL • EDUCATION 4.0
+        </p>
       </footer>
     </div>
   );
