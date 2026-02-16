@@ -7,24 +7,26 @@ import TeacherAvatar from './components/TeacherAvatar';
 import NeuralNetworkBackground from './components/NeuralNetworkBackground';
 
 const App: React.FC = () => {
+  // 1. Semua State didefinisikan di awal
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
+  // 2. Semua Ref didefinisikan di awal
   const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
   const sessionRef = useRef<any>(null);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const nextStartTimeRef = useRef<number>(0);
   const streamRef = useRef<MediaStream | null>(null);
+  const statusRef = useRef(status);
 
-  // Bersihkan resource saat unmount
+  // Update statusRef setiap kali status berubah agar callback bisa membaca nilai terbaru
   useEffect(() => {
-    return () => {
-      handleStop();
-    };
-  }, []);
+    statusRef.current = status;
+  }, [status]);
 
+  // Fungsi untuk menghentikan sesi dan membersihkan resource
   const handleStop = useCallback(() => {
     if (sessionRef.current) {
       try { sessionRef.current.close(); } catch(e) {}
@@ -37,8 +39,10 @@ const App: React.FC = () => {
     }
 
     if (audioContextRef.current) {
-      audioContextRef.current.input.close().catch(() => {});
-      audioContextRef.current.output.close().catch(() => {});
+      try {
+        audioContextRef.current.input.close();
+        audioContextRef.current.output.close();
+      } catch(e) {}
       audioContextRef.current = null;
     }
 
@@ -53,44 +57,64 @@ const App: React.FC = () => {
     nextStartTimeRef.current = 0;
   }, []);
 
+  // Bersihkan resource saat tab ditutup
+  useEffect(() => {
+    return () => handleStop();
+  }, [handleStop]);
+
   const handleStart = async () => {
     try {
       setStatus(ConnectionStatus.CONNECTING);
       setErrorMsg(null);
 
-      // 1. Validasi API Key
-      const apiKey = process.env.API_KEY;
+      // Ambil API Key dengan cara yang aman
+      let apiKey = "";
+      try {
+        // @ts-ignore
+        apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : "";
+      } catch (e) {
+        console.warn("Environment process.env not fully available");
+      }
+
       if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
-        throw new Error("API_KEY_INVALID");
+        throw new Error("API_KEY_MISSING");
       }
 
-      // 2. Validasi Protokol (Mic butuh HTTPS)
-      if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-        throw new Error("NOT_HTTPS");
+      // Cek apakah browser mendukung fitur keamanan yang diperlukan (Secure Context)
+      if (!window.isSecureContext) {
+        console.warn("Not in a secure context. Microphones may not be accessible.");
       }
 
-      // 3. Akses Mikrofon
+      // Minta izin mikrofon
       let stream: MediaStream;
       try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("BROWSER_NOT_SUPPORTED");
+        }
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         streamRef.current = stream;
-      } catch (micErr) {
-        console.error("Mic access denied:", micErr);
-        throw new Error("MIC_PERMISSION_DENIED");
+      } catch (micErr: any) {
+        console.error("Mic Error:", micErr);
+        if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
+          throw new Error("MIC_PERMISSION_DENIED");
+        }
+        throw new Error("MIC_INACCESSIBLE");
       }
       
       const ai = new GoogleGenAI({ apiKey });
       
-      // 4. Inisialisasi Audio Context
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      // Siapkan Audio Context
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const inputCtx = new AudioCtx({ sampleRate: 16000 });
+      const outputCtx = new AudioCtx({ sampleRate: 24000 });
       
-      if (inputCtx.state === 'suspended') await inputCtx.resume();
-      if (outputCtx.state === 'suspended') await outputCtx.resume();
+      // Penting: Resume context (kebijakan browser)
+      await inputCtx.resume();
+      await outputCtx.resume();
 
       audioContextRef.current = { input: inputCtx, output: outputCtx };
 
-      // 5. Koneksi ke Live API
+      // Hubungkan ke Gemini Live API
       const session = await ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
@@ -98,11 +122,10 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
-          systemInstruction: 'Anda adalah Ibu Guru Smansa AI. Berikan jawaban yang mendidik, sopan, dan panggil siswa dengan Nak. Gunakan bahasa Indonesia yang baik.',
+          systemInstruction: 'Anda adalah Ibu Guru Smansa AI di SMAN 1 Tual. Anda bijaksana, suportif, dan ramah. Panggil siswa dengan Nak. Jawab dengan bahasa Indonesia yang hangat.',
         },
         callbacks: {
           onopen: () => {
-            console.log("Gemini Live Session Opened");
             setStatus(ConnectionStatus.CONNECTED);
             setIsListening(true);
             
@@ -121,35 +144,27 @@ const App: React.FC = () => {
             scriptProcessor.connect(inputCtx.destination);
           },
           onmessage: async (message) => {
-            // Tangani Audio Output
             const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData) {
               setIsSpeaking(true);
-              try {
-                const buffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
-                const source = outputCtx.createBufferSource();
-                source.buffer = buffer;
-                source.connect(outputCtx.destination);
-                
-                const now = outputCtx.currentTime;
-                if (nextStartTimeRef.current < now) {
-                  nextStartTimeRef.current = now;
-                }
-                
-                source.start(nextStartTimeRef.current);
-                nextStartTimeRef.current += buffer.duration;
-                sourcesRef.current.add(source);
-                
-                source.onended = () => {
-                  sourcesRef.current.delete(source);
-                  if (sourcesRef.current.size === 0) setIsSpeaking(false);
-                };
-              } catch (decodeErr) {
-                console.error("Audio decoding failed:", decodeErr);
-              }
+              const buffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
+              const source = outputCtx.createBufferSource();
+              source.buffer = buffer;
+              source.connect(outputCtx.destination);
+              
+              const now = outputCtx.currentTime;
+              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, now);
+              
+              source.start(nextStartTimeRef.current);
+              nextStartTimeRef.current += buffer.duration;
+              sourcesRef.current.add(source);
+              
+              source.onended = () => {
+                sourcesRef.current.delete(source);
+                if (sourcesRef.current.size === 0) setIsSpeaking(false);
+              };
             }
 
-            // Tangani Interupsi
             if (message.serverContent?.interrupted) {
               sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
               sourcesRef.current.clear();
@@ -158,43 +173,34 @@ const App: React.FC = () => {
             }
           },
           onerror: (e: any) => {
-            console.error("Gemini WebSocket Error:", e);
-            const msg = e?.message || "Koneksi terputus tiba-tiba.";
-            setErrorMsg(`Server Error: ${msg}`);
+            console.error("Gemini Error:", e);
+            setErrorMsg(`Error: ${e.message || "Gagal menghubungi server AI"}`);
             setStatus(ConnectionStatus.ERROR);
           },
-          onclose: (e) => {
-            console.log("Gemini Session Closed", e);
-            handleStop();
-          }
+          onclose: () => handleStop()
         }
       });
 
       sessionRef.current = session;
     } catch (err: any) {
-      console.error("App Initialization Failed:", err);
+      console.error("Startup Error:", err);
       setStatus(ConnectionStatus.ERROR);
       
       if (err.message === "MIC_PERMISSION_DENIED") {
-        setErrorMsg("Akses mikrofon ditolak oleh browser.");
-      } else if (err.message === "API_KEY_INVALID") {
-        setErrorMsg("API Key tidak valid atau belum diset di Vercel.");
-      } else if (err.message === "NOT_HTTPS") {
-        setErrorMsg("Aplikasi ini memerlukan koneksi aman (HTTPS).");
-      } else if (err.message?.includes("Requested entity was not found")) {
-        setErrorMsg("Model AI tidak tersedia untuk API Key ini.");
+        setErrorMsg("Akses mikrofon ditolak. Klik ikon gembok di browser untuk mengizinkan.");
+      } else if (err.message === "API_KEY_MISSING") {
+        setErrorMsg("API Key belum diatur di Vercel (Environment Variables).");
+      } else if (err.message === "BROWSER_NOT_SUPPORTED") {
+        setErrorMsg("Browser Anda tidak mendukung fitur mikrofon yang diperlukan.");
+      } else if (err.message === "MIC_INACCESSIBLE") {
+        setErrorMsg("Mikrofon tidak dapat diakses. Pastikan tidak sedang digunakan aplikasi lain.");
       } else {
-        setErrorMsg(`Gagal: ${err.message || "Masalah jaringan"}`);
+        setErrorMsg(err.message || "Gagal menghubungkan ke Ibu Guru.");
       }
       
-      // Auto-stop untuk membersihkan resource
-      setTimeout(handleStop, 3000);
+      setTimeout(() => { if(statusRef.current === ConnectionStatus.ERROR) setStatus(ConnectionStatus.DISCONNECTED); }, 5000);
     }
   };
-
-  // Ref untuk status agar callback bisa baca nilai terbaru
-  const statusRef = useRef(status);
-  statusRef.current = status;
 
   return (
     <div className="min-h-screen flex flex-col items-center bg-black text-white selection:bg-pink-900/50 overflow-hidden relative font-['Plus_Jakarta_Sans']">
@@ -214,7 +220,7 @@ const App: React.FC = () => {
         
         <div className={`px-4 py-2 rounded-full text-[10px] font-black tracking-widest border backdrop-blur-md transition-all duration-500 ${
           status === ConnectionStatus.CONNECTED 
-            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.2)]' 
+            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' 
             : status === ConnectionStatus.CONNECTING 
             ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 animate-pulse'
             : 'bg-slate-800/50 text-slate-400 border-slate-700'
@@ -236,28 +242,33 @@ const App: React.FC = () => {
               <button 
                 onClick={handleStart} 
                 disabled={status === ConnectionStatus.CONNECTING}
-                className="w-full py-5 bg-gradient-to-r from-pink-600 to-rose-600 text-white font-black rounded-2xl shadow-xl shadow-pink-600/20 active:scale-95 hover:scale-[1.02] disabled:opacity-50 disabled:scale-100 transition-all uppercase tracking-wider text-sm"
+                className="w-full py-5 bg-gradient-to-r from-pink-600 to-rose-600 text-white font-black rounded-2xl shadow-xl shadow-pink-600/20 active:scale-95 hover:scale-[1.02] disabled:opacity-50 transition-all uppercase tracking-wider text-sm"
               >
-                {status === ConnectionStatus.CONNECTING ? 'Menyiapkan...' : 'Mulai Konsultasi'}
+                {status === ConnectionStatus.CONNECTING ? 'Menghubungkan...' : 'Mulai Konsultasi'}
               </button>
             ) : (
               <button 
                 onClick={handleStop} 
-                className="w-full py-5 bg-white text-black font-black rounded-2xl active:scale-95 hover:bg-slate-100 transition-all uppercase tracking-wider text-sm shadow-[0_0_30px_rgba(255,255,255,0.2)]"
+                className="w-full py-5 bg-white text-black font-black rounded-2xl active:scale-95 hover:bg-slate-100 transition-all uppercase tracking-wider text-sm"
               >
                 Selesaikan Sesi
               </button>
             )}
             
             {errorMsg && (
-              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-center animate-shake">
+              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-center">
                 <p className="text-rose-400 text-[10px] font-bold uppercase tracking-tight leading-relaxed">{errorMsg}</p>
-                <button onClick={() => window.location.reload()} className="mt-2 text-[9px] underline opacity-50 hover:opacity-100">Refresh Halaman</button>
+                <button 
+                  onClick={() => window.location.reload()} 
+                  className="mt-2 text-[9px] uppercase font-bold text-white/40 hover:text-white underline transition-all"
+                >
+                  Segarkan Halaman
+                </button>
               </div>
             )}
             
             <p className="text-slate-500 text-[9px] text-center font-medium uppercase tracking-[0.2em]">
-              {status === ConnectionStatus.CONNECTED ? 'Ibu Guru sedang mendengarkan...' : 'Klik tombol di atas untuk bicara'}
+              {status === ConnectionStatus.CONNECTED ? 'Ibu Guru siap membantu Anda...' : 'Interaksi Suara Langsung'}
             </p>
           </div>
         </div>
@@ -268,17 +279,6 @@ const App: React.FC = () => {
           SMA NEGERI 1 TUAL • EDUCATION 4.0
         </p>
       </footer>
-
-      <style>{`
-        @keyframes shake {
-          0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-5px); }
-          75% { transform: translateX(5px); }
-        }
-        .animate-shake {
-          animation: shake 0.3s ease-in-out;
-        }
-      `}</style>
     </div>
   );
 };
