@@ -19,13 +19,15 @@ const App: React.FC = () => {
   const streamRef = useRef<MediaStream | null>(null);
   const statusRef = useRef(status);
 
+  // Sinkronisasi ref dengan state untuk akses di dalam callback async
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
   const handleStop = useCallback(() => {
+    console.log("Stopping session...");
     if (sessionRef.current) {
-      try { sessionRef.current.close(); } catch(e) {}
+      try { sessionRef.current.close(); } catch(e) { console.error("Error closing session:", e); }
       sessionRef.current = null;
     }
     
@@ -38,7 +40,7 @@ const App: React.FC = () => {
       try {
         audioContextRef.current.input.close();
         audioContextRef.current.output.close();
-      } catch(e) {}
+      } catch(e) { console.error("Error closing audio context:", e); }
       audioContextRef.current = null;
     }
 
@@ -53,23 +55,26 @@ const App: React.FC = () => {
     nextStartTimeRef.current = 0;
   }, []);
 
+  // Cleanup saat unmount
   useEffect(() => {
     return () => handleStop();
   }, [handleStop]);
 
   const handleStart = async () => {
     try {
+      console.log("Starting connection process...");
       setStatus(ConnectionStatus.CONNECTING);
       setErrorMsg(null);
 
-      // Sesuai instruksi: Mengambil API_KEY langsung dari process.env.API_KEY
+      // 1. Verifikasi API Key (Jangan tampilkan kuncinya di log untuk keamanan)
       const apiKey = process.env.API_KEY;
-
-      if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
+      if (!apiKey || apiKey === "undefined" || apiKey.trim().length < 10) {
+        console.error("API Key check failed: Key is missing or invalid length");
         throw new Error("API_KEY_MISSING");
       }
+      console.log("API Key detected, length:", apiKey.length);
 
-      // Minta izin mikrofon
+      // 2. Minta Izin Mikrofon Terlebih Dahulu
       let stream: MediaStream;
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -77,36 +82,44 @@ const App: React.FC = () => {
         }
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         streamRef.current = stream;
+        console.log("Microphone access granted");
       } catch (micErr: any) {
+        console.error("Microphone access error:", micErr);
         if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
           throw new Error("MIC_PERMISSION_DENIED");
         }
         throw new Error("MIC_INACCESSIBLE");
       }
       
-      // Inisialisasi sesuai panduan @google/genai
+      // 3. Inisialisasi GoogleGenAI baru (Selalu baru untuk menghindari state basi)
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      // 4. Siapkan Audio Context
+      const AudioCtx = (window.AudioContext || (window as any).webkitAudioContext);
       const inputCtx = new AudioCtx({ sampleRate: 16000 });
       const outputCtx = new AudioCtx({ sampleRate: 24000 });
       
+      // Penting: Resume konteks karena kebijakan autoplay browser
       await inputCtx.resume();
       await outputCtx.resume();
+      console.log("Audio contexts resumed and ready");
 
       audioContextRef.current = { input: inputCtx, output: outputCtx };
 
-      const session = await ai.live.connect({
+      // 5. Hubungkan ke Live API
+      // sessionPromise digunakan untuk memastikan sendRealtimeInput hanya dipanggil setelah connect resolve
+      const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
-          systemInstruction: 'Anda adalah Ibu Guru Smansa AI di SMAN 1 Tual. Anda bijaksana, suportif, dan ramah. Panggil siswa dengan Nak. Jawab dengan bahasa Indonesia yang hangat.',
+          systemInstruction: 'Anda adalah Ibu Guru Smansa AI di SMAN 1 Tual. Anda bijaksana, suportif, dan ramah. Panggil siswa dengan Nak. Jawab dengan bahasa Indonesia yang hangat dan edukatif.',
         },
         callbacks: {
           onopen: () => {
+            console.log("WebSocket Connection Opened Successfully");
             setStatus(ConnectionStatus.CONNECTED);
             setIsListening(true);
             
@@ -114,10 +127,13 @@ const App: React.FC = () => {
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             
             scriptProcessor.onaudioprocess = (e) => {
-              if (sessionRef.current && statusRef.current === ConnectionStatus.CONNECTED) {
+              // Gunakan sessionPromise untuk menjamin session sudah siap
+              if (statusRef.current === ConnectionStatus.CONNECTED) {
                 const inputData = e.inputBuffer.getChannelData(0);
                 const pcmBlob = createPcmBlob(inputData);
-                sessionRef.current.sendRealtimeInput({ media: pcmBlob });
+                sessionPromise.then(session => {
+                  session.sendRealtimeInput({ media: pcmBlob });
+                }).catch(err => console.error("Failed to send audio input:", err));
               }
             };
             
@@ -128,25 +144,30 @@ const App: React.FC = () => {
             const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (audioData) {
               setIsSpeaking(true);
-              const buffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
-              const source = outputCtx.createBufferSource();
-              source.buffer = buffer;
-              source.connect(outputCtx.destination);
-              
-              const now = outputCtx.currentTime;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, now);
-              
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += buffer.duration;
-              sourcesRef.current.add(source);
-              
-              source.onended = () => {
-                sourcesRef.current.delete(source);
-                if (sourcesRef.current.size === 0) setIsSpeaking(false);
-              };
+              try {
+                const buffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
+                const source = outputCtx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(outputCtx.destination);
+                
+                const now = outputCtx.currentTime;
+                nextStartTimeRef.current = Math.max(nextStartTimeRef.current, now);
+                
+                source.start(nextStartTimeRef.current);
+                nextStartTimeRef.current += buffer.duration;
+                sourcesRef.current.add(source);
+                
+                source.onended = () => {
+                  sourcesRef.current.delete(source);
+                  if (sourcesRef.current.size === 0) setIsSpeaking(false);
+                };
+              } catch (decodeErr) {
+                console.error("Audio decoding error:", decodeErr);
+              }
             }
 
             if (message.serverContent?.interrupted) {
+              console.log("Model interrupted, clearing audio queue");
               sourcesRef.current.forEach(s => { try { s.stop(); } catch(e) {} });
               sourcesRef.current.clear();
               nextStartTimeRef.current = outputCtx.currentTime;
@@ -154,27 +175,46 @@ const App: React.FC = () => {
             }
           },
           onerror: (e: any) => {
-            setErrorMsg(`Error: ${e.message || "Gagal menghubungi server AI"}`);
+            console.error("Gemini API Callback Error:", e);
+            setErrorMsg(`Koneksi Terputus: ${e.message || "Masalah jaringan atau API Key tidak valid"}`);
             setStatus(ConnectionStatus.ERROR);
+            handleStop();
           },
-          onclose: () => handleStop()
+          onclose: (e: any) => {
+            console.log("WebSocket Closed:", e);
+            if (statusRef.current === ConnectionStatus.CONNECTING) {
+              setErrorMsg("Gagal membuka koneksi. Pastikan API Key di Vercel sudah benar dan akun Anda memiliki kuota.");
+              setStatus(ConnectionStatus.ERROR);
+            } else if (statusRef.current !== ConnectionStatus.DISCONNECTED) {
+              setStatus(ConnectionStatus.DISCONNECTED);
+            }
+          }
         }
       });
 
-      sessionRef.current = session;
+      sessionRef.current = await sessionPromise;
+      console.log("Session promise resolved");
+
     } catch (err: any) {
-      console.error("Startup Error:", err);
+      console.error("Critical Startup Error:", err);
       setStatus(ConnectionStatus.ERROR);
       
       if (err.message === "API_KEY_MISSING") {
-        setErrorMsg("API Key terdeteksi kosong. Anda WAJIB melakukan 'Redeploy' di dashboard Vercel agar perubahan Environment Variables terbaca.");
+        setErrorMsg("API Key belum terbaca. Harap lakukan 'Redeploy' di Vercel Dashboard setelah mengatur Environment Variable.");
       } else if (err.message === "MIC_PERMISSION_DENIED") {
-        setErrorMsg("Akses mikrofon ditolak.");
+        setErrorMsg("Akses mikrofon ditolak. Mohon izinkan mikrofon di pengaturan browser.");
+      } else if (err.message === "MIC_INACCESSIBLE") {
+        setErrorMsg("Mikrofon tidak dapat diakses. Mungkin sedang digunakan aplikasi lain.");
       } else {
-        setErrorMsg(err.message || "Gagal menghubungkan ke Ibu Guru.");
+        setErrorMsg(`Gagal memulai: ${err.message || "Terjadi kesalahan sistem"}`);
       }
       
-      setTimeout(() => { if(statusRef.current === ConnectionStatus.ERROR) setStatus(ConnectionStatus.DISCONNECTED); }, 8000);
+      // Reset status setelah beberapa detik agar tombol bisa diklik lagi
+      setTimeout(() => { 
+        if(statusRef.current === ConnectionStatus.ERROR) {
+          setStatus(ConnectionStatus.DISCONNECTED);
+        }
+      }, 10000);
     }
   };
 
@@ -199,11 +239,13 @@ const App: React.FC = () => {
             ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' 
             : status === ConnectionStatus.CONNECTING 
             ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 animate-pulse'
+            : status === ConnectionStatus.ERROR
+            ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
             : 'bg-slate-800/50 text-slate-400 border-slate-700'
         }`}>
           {status === ConnectionStatus.CONNECTED ? '● SISTEM AKTIF' : 
            status === ConnectionStatus.CONNECTING ? 'MENGHUBUNGKAN...' : 
-           status === ConnectionStatus.ERROR ? 'ERROR SISTEM' : 'STANDBY'}
+           status === ConnectionStatus.ERROR ? 'KEGAGALAN SISTEM' : 'STANDBY'}
         </div>
       </header>
 
@@ -220,7 +262,7 @@ const App: React.FC = () => {
                 disabled={status === ConnectionStatus.CONNECTING}
                 className="w-full py-5 bg-gradient-to-r from-pink-600 to-rose-600 text-white font-black rounded-2xl shadow-xl shadow-pink-600/20 active:scale-95 hover:scale-[1.02] disabled:opacity-50 transition-all uppercase tracking-wider text-sm"
               >
-                {status === ConnectionStatus.CONNECTING ? 'Menghubungkan...' : 'Mulai Konsultasi'}
+                {status === ConnectionStatus.CONNECTING ? 'Membuka Jalur Suara...' : 'Mulai Konsultasi'}
               </button>
             ) : (
               <button 
@@ -237,25 +279,19 @@ const App: React.FC = () => {
                   {errorMsg}
                 </p>
                 <div className="flex flex-col gap-2">
-                  <a 
-                    href="https://vercel.com/dashboard" 
-                    target="_blank" 
-                    className="text-[10px] bg-rose-500/20 py-2 rounded-lg font-black uppercase tracking-widest text-white hover:bg-rose-500/40 transition-all"
-                  >
-                    Buka Vercel Dashboard
-                  </a>
                   <button 
                     onClick={() => window.location.reload()} 
-                    className="text-[9px] uppercase font-bold text-white/40 hover:text-white underline transition-all"
+                    className="text-[10px] bg-white/10 py-2 rounded-lg font-black uppercase tracking-widest text-white hover:bg-white/20 transition-all"
                   >
-                    Segarkan Halaman
+                    Segarkan Browser
                   </button>
+                  <p className="text-[8px] text-white/30 uppercase font-medium">Tips: Jika error berlanjut, cek API Key di dashboard Vercel.</p>
                 </div>
               </div>
             )}
             
             <p className="text-slate-500 text-[9px] text-center font-medium uppercase tracking-[0.2em]">
-              {status === ConnectionStatus.CONNECTED ? 'Ibu Guru siap membantu Anda...' : 'Interaksi Suara Langsung'}
+              {status === ConnectionStatus.CONNECTED ? 'Ibu Guru sedang mendengarkan...' : 'Kualitas Audio HD • Enkripsi SMANSA'}
             </p>
           </div>
         </div>
@@ -263,7 +299,7 @@ const App: React.FC = () => {
 
       <footer className="w-full px-8 py-6 text-center z-50">
         <p className="text-[9px] font-bold tracking-[0.6em] text-white/20 uppercase">
-          SMA NEGERI 1 TUAL • EDUCATION 4.0
+          SMA NEGERI 1 TUAL • CYBER EDUCATION PROJECT
         </p>
       </footer>
     </div>
