@@ -7,13 +7,11 @@ import TeacherAvatar from './components/TeacherAvatar';
 import NeuralNetworkBackground from './components/NeuralNetworkBackground';
 
 const App: React.FC = () => {
-  // 1. Semua State didefinisikan di awal
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // 2. Semua Ref didefinisikan di awal
   const audioContextRef = useRef<{ input: AudioContext; output: AudioContext } | null>(null);
   const sessionRef = useRef<any>(null);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
@@ -21,12 +19,10 @@ const App: React.FC = () => {
   const streamRef = useRef<MediaStream | null>(null);
   const statusRef = useRef(status);
 
-  // Update statusRef setiap kali status berubah agar callback bisa membaca nilai terbaru
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
-  // Fungsi untuk menghentikan sesi dan membersihkan resource
   const handleStop = useCallback(() => {
     if (sessionRef.current) {
       try { sessionRef.current.close(); } catch(e) {}
@@ -57,7 +53,6 @@ const App: React.FC = () => {
     nextStartTimeRef.current = 0;
   }, []);
 
-  // Bersihkan resource saat tab ditutup
   useEffect(() => {
     return () => handleStop();
   }, [handleStop]);
@@ -67,22 +62,11 @@ const App: React.FC = () => {
       setStatus(ConnectionStatus.CONNECTING);
       setErrorMsg(null);
 
-      // Ambil API Key dengan cara yang aman
-      let apiKey = "";
-      try {
-        // @ts-ignore
-        apiKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : "";
-      } catch (e) {
-        console.warn("Environment process.env not fully available");
-      }
+      // Sesuai instruksi: Mengambil API_KEY langsung dari process.env.API_KEY
+      const apiKey = process.env.API_KEY;
 
       if (!apiKey || apiKey === "undefined" || apiKey.length < 10) {
         throw new Error("API_KEY_MISSING");
-      }
-
-      // Cek apakah browser mendukung fitur keamanan yang diperlukan (Secure Context)
-      if (!window.isSecureContext) {
-        console.warn("Not in a secure context. Microphones may not be accessible.");
       }
 
       // Minta izin mikrofon
@@ -94,27 +78,24 @@ const App: React.FC = () => {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         streamRef.current = stream;
       } catch (micErr: any) {
-        console.error("Mic Error:", micErr);
         if (micErr.name === 'NotAllowedError' || micErr.name === 'PermissionDeniedError') {
           throw new Error("MIC_PERMISSION_DENIED");
         }
         throw new Error("MIC_INACCESSIBLE");
       }
       
-      const ai = new GoogleGenAI({ apiKey });
+      // Inisialisasi sesuai panduan @google/genai
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
       
-      // Siapkan Audio Context
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const inputCtx = new AudioCtx({ sampleRate: 16000 });
       const outputCtx = new AudioCtx({ sampleRate: 24000 });
       
-      // Penting: Resume context (kebijakan browser)
       await inputCtx.resume();
       await outputCtx.resume();
 
       audioContextRef.current = { input: inputCtx, output: outputCtx };
 
-      // Hubungkan ke Gemini Live API
       const session = await ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
@@ -173,7 +154,6 @@ const App: React.FC = () => {
             }
           },
           onerror: (e: any) => {
-            console.error("Gemini Error:", e);
             setErrorMsg(`Error: ${e.message || "Gagal menghubungi server AI"}`);
             setStatus(ConnectionStatus.ERROR);
           },
@@ -186,19 +166,15 @@ const App: React.FC = () => {
       console.error("Startup Error:", err);
       setStatus(ConnectionStatus.ERROR);
       
-      if (err.message === "MIC_PERMISSION_DENIED") {
-        setErrorMsg("Akses mikrofon ditolak. Klik ikon gembok di browser untuk mengizinkan.");
-      } else if (err.message === "API_KEY_MISSING") {
-        setErrorMsg("API Key belum diatur di Vercel (Environment Variables).");
-      } else if (err.message === "BROWSER_NOT_SUPPORTED") {
-        setErrorMsg("Browser Anda tidak mendukung fitur mikrofon yang diperlukan.");
-      } else if (err.message === "MIC_INACCESSIBLE") {
-        setErrorMsg("Mikrofon tidak dapat diakses. Pastikan tidak sedang digunakan aplikasi lain.");
+      if (err.message === "API_KEY_MISSING") {
+        setErrorMsg("API Key terdeteksi kosong. Anda WAJIB melakukan 'Redeploy' di dashboard Vercel agar perubahan Environment Variables terbaca.");
+      } else if (err.message === "MIC_PERMISSION_DENIED") {
+        setErrorMsg("Akses mikrofon ditolak.");
       } else {
         setErrorMsg(err.message || "Gagal menghubungkan ke Ibu Guru.");
       }
       
-      setTimeout(() => { if(statusRef.current === ConnectionStatus.ERROR) setStatus(ConnectionStatus.DISCONNECTED); }, 5000);
+      setTimeout(() => { if(statusRef.current === ConnectionStatus.ERROR) setStatus(ConnectionStatus.DISCONNECTED); }, 8000);
     }
   };
 
@@ -237,7 +213,7 @@ const App: React.FC = () => {
           
           <TeacherAvatar isSpeaking={isSpeaking} isListening={isListening} status={status} />
           
-          <div className="mt-12 w-full max-w-xs space-y-4">
+          <div className="mt-12 w-full max-w-sm space-y-4">
             {status !== ConnectionStatus.CONNECTED ? (
               <button 
                 onClick={handleStart} 
@@ -256,14 +232,25 @@ const App: React.FC = () => {
             )}
             
             {errorMsg && (
-              <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-center">
-                <p className="text-rose-400 text-[10px] font-bold uppercase tracking-tight leading-relaxed">{errorMsg}</p>
-                <button 
-                  onClick={() => window.location.reload()} 
-                  className="mt-2 text-[9px] uppercase font-bold text-white/40 hover:text-white underline transition-all"
-                >
-                  Segarkan Halaman
-                </button>
+              <div className="p-5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-center animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <p className="text-rose-400 text-[11px] font-bold uppercase tracking-tight leading-relaxed mb-3">
+                  {errorMsg}
+                </p>
+                <div className="flex flex-col gap-2">
+                  <a 
+                    href="https://vercel.com/dashboard" 
+                    target="_blank" 
+                    className="text-[10px] bg-rose-500/20 py-2 rounded-lg font-black uppercase tracking-widest text-white hover:bg-rose-500/40 transition-all"
+                  >
+                    Buka Vercel Dashboard
+                  </a>
+                  <button 
+                    onClick={() => window.location.reload()} 
+                    className="text-[9px] uppercase font-bold text-white/40 hover:text-white underline transition-all"
+                  >
+                    Segarkan Halaman
+                  </button>
+                </div>
               </div>
             )}
             
