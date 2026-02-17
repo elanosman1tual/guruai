@@ -64,11 +64,17 @@ const App: React.FC = () => {
 
   const startMicStreaming = useCallback(async (sessionPromise: Promise<any>) => {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("Browser tidak mendukung akses mikrofon.");
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
       
       if (!inputAudioCtx.current) {
         inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
+      } else if (inputAudioCtx.current.state === 'suspended') {
+        await inputAudioCtx.current.resume();
       }
       
       const source = inputAudioCtx.current.createMediaStreamSource(stream);
@@ -85,8 +91,20 @@ const App: React.FC = () => {
       
       source.connect(processor);
       processor.connect(inputAudioCtx.current.destination);
-    } catch (err) {
-      setErrorMsg("Gagal mengakses mikrofon.");
+    } catch (err: any) {
+      console.error("Mic access error:", err);
+      let friendlyMessage = "Gagal mengakses mikrofon.";
+      
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        friendlyMessage = "Izin mikrofon ditolak. Harap izinkan akses di browser Anda.";
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        friendlyMessage = "Mikrofon tidak ditemukan. Pastikan headset/mic terpasang.";
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        friendlyMessage = "Mikrofon sedang digunakan oleh aplikasi lain.";
+      }
+      
+      setErrorMsg(friendlyMessage);
+      setTechError(err.message);
       disconnect();
     }
   }, [disconnect]);
@@ -98,15 +116,23 @@ const App: React.FC = () => {
       setStatus(ConnectionStatus.CONNECTING);
       setTranscription("Mengaktifkan modul inteligensi...");
 
-      // Mengambil API Key dari environment (diberikan secara otomatis oleh platform)
       const apiKey = process.env.API_KEY;
+      if (!apiKey) {
+        setErrorMsg("API Key belum terpasang.");
+        setStatus(ConnectionStatus.ERROR);
+        return;
+      }
+
       const ai = new GoogleGenAI({ apiKey: apiKey });
       
       if (!inputAudioCtx.current) inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
       if (!outputAudioCtx.current) outputAudioCtx.current = new AudioContext({ sampleRate: 24000 });
 
-      if (inputAudioCtx.current.state === 'suspended') await inputAudioCtx.current.resume();
-      if (outputAudioCtx.current.state === 'suspended') await outputAudioCtx.current.resume();
+      // Pastikan context resume pada aksi user
+      await Promise.all([
+        inputAudioCtx.current.state === 'suspended' ? inputAudioCtx.current.resume() : Promise.resolve(),
+        outputAudioCtx.current.state === 'suspended' ? outputAudioCtx.current.resume() : Promise.resolve()
+      ]);
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -165,8 +191,8 @@ const App: React.FC = () => {
             setStatus(ConnectionStatus.ERROR);
             setTechError(msg);
             
-            if (msg.includes("Requested entity was not found") || msg.includes("API key")) {
-              setErrorMsg("Masalah otentikasi. Silakan atur ulang API Key.");
+            if (msg.includes("Requested entity was not found")) {
+              setErrorMsg("Model tidak tersedia atau billing belum aktif.");
             } else {
               setErrorMsg("Gagal terhubung ke server AI.");
             }
@@ -181,8 +207,7 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error("Setup error:", err);
       setStatus(ConnectionStatus.ERROR);
-      const errorMessage = err?.message || "Kesalahan inisialisasi modul.";
-      setTechError(errorMessage);
+      setTechError(err.message);
       setErrorMsg("Gagal memanggil modul AI.");
     }
   }, [disconnect, stopAllAudio, startMicStreaming]);
@@ -258,12 +283,20 @@ const App: React.FC = () => {
                 <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-center animate-shake">
                   <p className="text-red-400 text-[10px] font-bold uppercase mb-1">{errorMsg}</p>
                   {techError && <p className="text-white/20 text-[7px] font-mono break-words">{techError}</p>}
-                  <button 
-                    onClick={handleOpenConfig}
-                    className="mt-3 text-[9px] font-bold text-blue-400 underline uppercase tracking-widest"
-                  >
-                    Atur Ulang Project/Key
-                  </button>
+                  <div className="mt-3 flex gap-4 justify-center">
+                    <button 
+                      onClick={() => window.location.reload()}
+                      className="text-[9px] font-bold text-white/40 underline uppercase tracking-widest"
+                    >
+                      Reload Halaman
+                    </button>
+                    <button 
+                      onClick={handleOpenConfig}
+                      className="text-[9px] font-bold text-blue-400 underline uppercase tracking-widest"
+                    >
+                      Atur Ulang Key
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
