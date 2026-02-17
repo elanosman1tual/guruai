@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { ConnectionStatus } from './types';
 import TeacherAvatar from './components/TeacherAvatar';
@@ -54,22 +54,47 @@ const App: React.FC = () => {
     transcriptionBuffer.current = "";
   }, []);
 
+  const handleSelectKey = async () => {
+    try {
+      // Use the pre-configured window.aistudio to open the key selection dialog.
+      // Cast to any because the global interface might be conflicting with environment types.
+      await (window as any).aistudio.openSelectKey();
+      // Assume selection successful and proceed as per guidelines
+      connectToTeacher();
+    } catch (err) {
+      console.error("Key selection failed", err);
+    }
+  };
+
   const connectToTeacher = async () => {
     try {
+      // Exclusively use process.env.API_KEY as per guidelines
+      const apiKey = process.env.API_KEY || '';
+      
+      if (!apiKey) {
+        setErrorMsg("API Key tidak ditemukan.");
+        setStatus(ConnectionStatus.ERROR);
+        return;
+      }
+
       setErrorMsg(null);
       setStatus(ConnectionStatus.CONNECTING);
       setTranscription("Menghubungi Ibu Guru...");
 
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Create a fresh instance right before making an API call to ensure it uses the most up-to-date API key
+      const ai = new GoogleGenAI({ apiKey: apiKey });
       
       if (!inputAudioCtx.current) inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
       if (!outputAudioCtx.current) outputAudioCtx.current = new AudioContext({ sampleRate: 24000 });
+
+      if (inputAudioCtx.current.state === 'suspended') await inputAudioCtx.current.resume();
+      if (outputAudioCtx.current.state === 'suspended') await outputAudioCtx.current.resume();
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          outputAudioTranscription: {}, // Aktifkan transkrip teks
+          outputAudioTranscription: {}, 
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
@@ -79,11 +104,10 @@ const App: React.FC = () => {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
             setIsListening(true);
-            setTranscription("Siap mendengarkan Anda...");
+            setTranscription("Halo! Saya sudah di sini. Apa yang bisa saya bantu hari ini?");
             startMicStreaming(sessionPromise);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Handle Transcription
             if (message.serverContent?.outputTranscription) {
               const text = message.serverContent.outputTranscription.text;
               transcriptionBuffer.current += text;
@@ -91,14 +115,13 @@ const App: React.FC = () => {
             }
 
             if (message.serverContent?.turnComplete) {
-              // Reset buffer untuk giliran berikutnya jika perlu
-              // transcriptionBuffer.current = ""; 
+              transcriptionBuffer.current = ""; 
             }
 
-            // Handle Audio Output
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && outputAudioCtx.current) {
               const ctx = outputAudioCtx.current;
+              // Ensure gapless playback by scheduling based on nextStartTime
               nextStartTime.current = Math.max(nextStartTime.current, ctx.currentTime);
               
               const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
@@ -108,9 +131,7 @@ const App: React.FC = () => {
               
               source.addEventListener('ended', () => {
                 activeSources.current.delete(source);
-                if (activeSources.current.size === 0) {
-                  setIsSpeaking(false);
-                }
+                if (activeSources.current.size === 0) setIsSpeaking(false);
               });
 
               setIsSpeaking(true);
@@ -119,16 +140,18 @@ const App: React.FC = () => {
               activeSources.current.add(source);
             }
 
-            // Handle Interruption
             if (message.serverContent?.interrupted) {
               stopAllAudio();
-              transcriptionBuffer.current = "... (Terpotong)";
-              setTranscription(transcriptionBuffer.current);
+              setTranscription("(Mendengarkan Anda...)");
             }
           },
-          onerror: (e) => {
+          onerror: (e: any) => {
             console.error("Live API Error:", e);
-            setErrorMsg("API Key Google Gemini tidak valid atau kuota habis.");
+            if (e?.message?.includes("entity was not found") || e?.message?.includes("401") || e?.message?.includes("403")) {
+              setErrorMsg("API Key tidak valid atau tidak mendukung Live API. Gunakan API Key dari Project dengan Billing aktif.");
+            } else {
+              setErrorMsg("Gagal terhubung. Pastikan region Anda mendukung Gemini Live.");
+            }
             disconnect();
           },
           onclose: () => {
@@ -141,7 +164,7 @@ const App: React.FC = () => {
 
     } catch (err: any) {
       console.error("Connection failed:", err);
-      setErrorMsg("Koneksi gagal. Pastikan Anda menggunakan API Key Google Gemini.");
+      setErrorMsg("Koneksi gagal. Silakan pilih API Key yang valid.");
       setStatus(ConnectionStatus.ERROR);
     }
   };
@@ -159,10 +182,9 @@ const App: React.FC = () => {
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmBlob = createPcmBlob(inputData);
         
+        // Wait for session to be ready before sending realtime input
         sessionPromise.then(session => {
-          if (session) {
-            session.sendRealtimeInput({ media: pcmBlob });
-          }
+          if (session) session.sendRealtimeInput({ media: pcmBlob });
         });
       };
 
@@ -196,16 +218,12 @@ const App: React.FC = () => {
           <h1 className="font-black text-xl tracking-tighter italic uppercase">SMANSA <span className="text-pink-500">LIVE</span></h1>
         </div>
 
-        <div className={`px-4 py-1.5 rounded-full text-[10px] font-black tracking-widest border transition-all ${
-          status === ConnectionStatus.CONNECTED ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 shadow-[0_0_15px_rgba(52,211,153,0.2)]' : 
-          status === ConnectionStatus.CONNECTING ? 'bg-amber-500/10 text-amber-400 border-amber-500/20 animate-pulse' :
-          status === ConnectionStatus.ERROR ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 
-          'bg-white/5 text-white/40 border-white/10'
-        }`}>
-          {status === ConnectionStatus.CONNECTED ? 'GURU AKTIF' : 
-           status === ConnectionStatus.CONNECTING ? 'MENYAMBUNGKAN' : 
-           status === ConnectionStatus.ERROR ? 'ERROR API' : 'STANDBY'}
-        </div>
+        <button 
+          onClick={handleSelectKey}
+          className="px-4 py-1.5 rounded-full text-[10px] font-black tracking-widest bg-white/5 border border-white/10 hover:bg-white/10 transition-all uppercase"
+        >
+          Konfigurasi API
+        </button>
       </header>
 
       <main className="flex-1 w-full max-w-4xl flex flex-col items-center justify-center px-4 z-10 py-4">
@@ -217,10 +235,9 @@ const App: React.FC = () => {
             status={status} 
           />
 
-          {/* Real-time Transcription Display */}
-          <div className="mt-6 w-full max-w-lg min-h-[60px] text-center px-6">
-            <p className={`text-sm md:text-base font-medium leading-relaxed transition-all duration-300 ${isSpeaking ? 'text-white' : 'text-white/40 italic'}`}>
-              {transcription || (status === ConnectionStatus.CONNECTED ? "Mulai bicara untuk menyapa Ibu Guru..." : "")}
+          <div className="mt-8 w-full max-w-xl min-h-[100px] flex items-center justify-center text-center px-6 bg-black/20 rounded-3xl border border-white/5 shadow-inner">
+            <p className={`text-sm md:text-lg font-medium leading-relaxed transition-all duration-300 ${isSpeaking ? 'text-white' : 'text-white/40 italic'}`}>
+              {transcription || (status === ConnectionStatus.CONNECTED ? "Silakan sapa Ibu Guru..." : "Menunggu sambungan...")}
             </p>
           </div>
           
@@ -234,49 +251,58 @@ const App: React.FC = () => {
                   : 'bg-gradient-to-r from-pink-600 to-rose-600 text-white border-pink-500/50'
               } disabled:opacity-50`}
             >
-              {status === ConnectionStatus.CONNECTED ? 'Selesaikan Sesi' : 'Mulai Sesi Suara'}
+              {status === ConnectionStatus.CONNECTED ? 'Putuskan Panggilan' : 'Panggil Ibu Guru'}
             </button>
             
             {errorMsg && (
-              <div className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-center animate-shake">
-                <p className="text-rose-400 text-[10px] font-black uppercase leading-tight">{errorMsg}</p>
-                <p className="text-white/30 text-[8px] mt-1 font-bold">Pastikan API Key di environment adalah milik Google Gemini.</p>
+              <div className="p-5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-center animate-shake">
+                <p className="text-rose-400 text-[10px] font-black uppercase leading-tight mb-3">{errorMsg}</p>
+                <button 
+                  onClick={handleSelectKey}
+                  className="px-4 py-2 bg-rose-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-rose-500 transition-colors"
+                >
+                  Pilih Project Berbayar (Paid)
+                </button>
+                <p className="mt-2 text-[8px] text-white/30 italic leading-tight">
+                  Gemini Live membutuhkan API Key dari project Google Cloud dengan billing aktif. 
+                  Kunjungi <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline hover:text-white">ai.google.dev/gemini-api/docs/billing</a>
+                </p>
               </div>
             )}
             
-            <div className="flex flex-col items-center gap-2">
-              <div className="flex gap-1.5 h-4 items-center">
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex gap-1.5 h-6 items-center">
                 {isListening && !isSpeaking && (
                   <div className="flex gap-1">
                     {[...Array(3)].map((_, i) => (
-                      <div key={i} className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-bounce" style={{animationDelay: `${i*0.1}s`}} />
+                      <div key={i} className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{animationDelay: `${i*0.1}s`}} />
                     ))}
                   </div>
                 )}
                 {isSpeaking && (
-                   <div className="flex gap-0.5 items-end h-4">
-                     {[...Array(6)].map((_, i) => (
-                       <div key={i} className="w-1 bg-pink-500 rounded-full animate-wave" style={{animationDelay: `${i*0.07}s`, height: '100%'}} />
+                   <div className="flex gap-1 items-end h-5">
+                     {[...Array(8)].map((_, i) => (
+                       <div key={i} className="w-1 bg-pink-500 rounded-full animate-wave" style={{animationDelay: `${i*0.06}s`, height: '100%'}} />
                      ))}
                    </div>
                 )}
               </div>
-              <p className="text-white/10 text-[8px] text-center font-black uppercase tracking-[0.5em]">
-                {status === ConnectionStatus.CONNECTED ? 'Live Voice Synchronization' : 'Ready for Interaction'}
+              <p className="text-white/10 text-[7px] text-center font-black uppercase tracking-[0.6em]">
+                {status === ConnectionStatus.CONNECTED ? 'Protocol: Live Native Audio v2.5' : 'Ready to Connect'}
               </p>
             </div>
           </div>
         </div>
       </main>
 
-      <footer className="w-full py-4 text-center opacity-20 z-10">
-        <p className="text-[8px] font-black tracking-[0.8em] uppercase">Built with Gemini 2.5 Flash Native Audio Protocol</p>
+      <footer className="w-full py-6 text-center opacity-20 z-10">
+        <p className="text-[8px] font-black tracking-[0.8em] uppercase italic">Powered by Google Gemini Multimodal Live API</p>
       </footer>
 
       <style>{`
         @keyframes wave {
           0%, 100% { transform: scaleY(0.4); }
-          50% { transform: scaleY(1.2); }
+          50% { transform: scaleY(1.4); }
         }
         .animate-wave { animation: wave 0.6s ease-in-out infinite; }
         @keyframes shake {
