@@ -53,6 +53,15 @@ const App: React.FC = () => {
     transcriptionBuffer.current = "";
   }, [stopAllAudio]);
 
+  const handleOpenConfig = async () => {
+    if ((window as any).aistudio?.openSelectKey) {
+      await (window as any).aistudio.openSelectKey();
+      connectToTeacher();
+    } else {
+      setErrorMsg("Gagal membuka konfigurasi API.");
+    }
+  };
+
   const startMicStreaming = useCallback(async (sessionPromise: Promise<any>) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -77,7 +86,7 @@ const App: React.FC = () => {
       source.connect(processor);
       processor.connect(inputAudioCtx.current.destination);
     } catch (err) {
-      setErrorMsg("Gagal mengakses mikrofon. Pastikan izin diberikan.");
+      setErrorMsg("Gagal mengakses mikrofon.");
       disconnect();
     }
   }, [disconnect]);
@@ -87,10 +96,11 @@ const App: React.FC = () => {
       setErrorMsg(null);
       setTechError(null);
       setStatus(ConnectionStatus.CONNECTING);
-      setTranscription("Menghubungkan ke Pusat Inteligensi...");
+      setTranscription("Mengaktifkan modul inteligensi...");
 
-      // Inisialisasi langsung menggunakan API_KEY dari environment
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      // Mengambil API Key dari environment (diberikan secara otomatis oleh platform)
+      const apiKey = process.env.API_KEY;
+      const ai = new GoogleGenAI({ apiKey: apiKey });
       
       if (!inputAudioCtx.current) inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
       if (!outputAudioCtx.current) outputAudioCtx.current = new AudioContext({ sampleRate: 24000 });
@@ -106,13 +116,13 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
-          systemInstruction: 'Anda adalah Asisten Guru yang sangat cerdas, cepat, dan empatik. Nama Anda adalah Guru Smansa. Berikan jawaban yang mendalam namun ringkas. Gunakan Bahasa Indonesia yang sopan.'
+          systemInstruction: 'Anda adalah Guru Smansa, asisten pendidikan yang bijaksana dan ramah. Berikan bimbingan belajar dengan suara yang hangat dan profesional.'
         },
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
             setIsListening(true);
-            setTranscription("Koneksi berhasil. Silakan bicara dengan Ibu Guru.");
+            setTranscription("Terhubung! Silakan mulai bicara dengan Ibu Guru.");
             startMicStreaming(sessionPromise);
           },
           onmessage: async (message: LiveServerMessage) => {
@@ -146,15 +156,20 @@ const App: React.FC = () => {
 
             if (message.serverContent?.interrupted) {
               stopAllAudio();
-              setTranscription("(Mendengarkan instruksi baru...)");
+              setTranscription("(Guru sedang mendengarkan...)");
             }
           },
           onerror: (e: any) => {
+            const msg = e?.message || "Koneksi terputus.";
             console.error("API Error:", e);
             setStatus(ConnectionStatus.ERROR);
-            const msg = e?.message || "Terjadi kesalahan pada server AI.";
             setTechError(msg);
-            setErrorMsg("Koneksi gagal. Pastikan API Key Anda valid dan memiliki kuota.");
+            
+            if (msg.includes("Requested entity was not found") || msg.includes("API key")) {
+              setErrorMsg("Masalah otentikasi. Silakan atur ulang API Key.");
+            } else {
+              setErrorMsg("Gagal terhubung ke server AI.");
+            }
             disconnect();
           },
           onclose: () => disconnect()
@@ -166,6 +181,8 @@ const App: React.FC = () => {
     } catch (err: any) {
       console.error("Setup error:", err);
       setStatus(ConnectionStatus.ERROR);
+      const errorMessage = err?.message || "Kesalahan inisialisasi modul.";
+      setTechError(errorMessage);
       setErrorMsg("Gagal memanggil modul AI.");
     }
   }, [disconnect, stopAllAudio, startMicStreaming]);
@@ -188,14 +205,17 @@ const App: React.FC = () => {
             <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_10px_#3b82f6]"></div>
             <h1 className="font-bold text-lg tracking-widest uppercase">SMANSA <span className="text-blue-500">CYBER</span></h1>
           </div>
-          <span className="text-[9px] text-white/30 tracking-[0.3em] font-medium ml-4">INTELLIGENCE NODE 4.1</span>
+          <span className="text-[9px] text-white/30 tracking-[0.3em] font-medium ml-4">V4.1 LIVE CORE</span>
         </div>
         
-        <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10">
-          <span className="text-[9px] font-bold text-white/40 tracking-widest uppercase">
-            {status === ConnectionStatus.CONNECTED ? 'System: Online' : 'System: Ready'}
-          </span>
-        </div>
+        {status === ConnectionStatus.ERROR && (
+          <button 
+            onClick={handleOpenConfig}
+            className="px-4 py-1.5 rounded-full bg-blue-600/20 border border-blue-500/30 text-[9px] font-black uppercase tracking-widest hover:bg-blue-600/40 transition-all"
+          >
+            Atur Ulang API
+          </button>
+        )}
       </header>
 
       <main className="flex-1 w-full max-w-5xl flex flex-col items-center justify-center px-6 z-10">
@@ -208,16 +228,16 @@ const App: React.FC = () => {
           <div className="flex flex-col space-y-8 order-1 md:order-2">
             <div className="space-y-4">
               <div className="inline-block px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                <span className="text-[9px] font-black text-blue-400 uppercase tracking-widest">Voice-First Experience</span>
+                <span className="text-[9px] font-black text-blue-400 uppercase tracking-widest">Minimal Latency Interface</span>
               </div>
               <h2 className="text-4xl font-light text-white leading-tight">
-                Belajar Interaktif <br/> <span className="font-bold">Masa Depan.</span>
+                Diskusi Belajar <br/> <span className="font-bold">Masa Depan.</span>
               </h2>
             </div>
 
             <div className={`p-6 rounded-3xl bg-white/[0.03] border border-white/5 shadow-2xl transition-all duration-500 ${isSpeaking ? 'border-blue-500/30' : ''}`}>
               <p className={`text-sm md:text-base leading-relaxed min-h-[80px] ${isSpeaking ? 'text-white' : 'text-white/40'}`}>
-                {transcription || "Klik tombol di bawah untuk mulai berdiskusi..."}
+                {transcription || (status === ConnectionStatus.CONNECTING ? "Sedang menyambungkan..." : "Klik tombol di bawah untuk mulai...")}
               </p>
             </div>
 
@@ -231,25 +251,19 @@ const App: React.FC = () => {
                     : 'bg-blue-600 text-white hover:bg-blue-500 shadow-xl shadow-blue-600/20'
                 }`}
               >
-                {status === ConnectionStatus.CONNECTED ? (
-                  <>
-                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                    Selesaikan Sesi
-                  </>
-                ) : (
-                  <>
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
-                    </svg>
-                    Mulai Bicara
-                  </>
-                )}
+                {status === ConnectionStatus.CONNECTED ? 'Matikan Sesi' : status === ConnectionStatus.CONNECTING ? 'Mohon Tunggu...' : 'Mulai Percakapan'}
               </button>
 
               {errorMsg && (
-                <div className="p-4 rounded-xl bg-red-500/5 border border-red-500/10 text-center animate-shake">
+                <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-center animate-shake">
                   <p className="text-red-400 text-[10px] font-bold uppercase mb-1">{errorMsg}</p>
-                  {techError && <p className="text-white/20 text-[7px] font-mono truncate">{techError}</p>}
+                  {techError && <p className="text-white/20 text-[7px] font-mono break-words">{techError}</p>}
+                  <button 
+                    onClick={handleOpenConfig}
+                    className="mt-3 text-[9px] font-bold text-blue-400 underline uppercase tracking-widest"
+                  >
+                    Atur Ulang Project/Key
+                  </button>
                 </div>
               )}
             </div>
@@ -257,16 +271,11 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      <footer className="w-full py-8 px-10 flex justify-center opacity-20 z-10">
-        <p className="text-[8px] font-black uppercase tracking-[0.5em] italic">Smansa AI System &copy; 2024</p>
+      <footer className="w-full py-8 flex justify-center opacity-20 z-10">
+        <p className="text-[8px] font-black uppercase tracking-[0.5em] italic">Intelligence System &copy; 2024</p>
       </footer>
 
       <style>{`
-        @keyframes wave {
-          0%, 100% { height: 20%; }
-          50% { height: 100%; }
-        }
-        .animate-wave { animation: wave 0.8s ease-in-out infinite; }
         @keyframes shake {
           0%, 100% { transform: translateX(0); }
           25% { transform: translateX(-2px); }
