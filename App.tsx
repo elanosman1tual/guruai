@@ -11,29 +11,30 @@ const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [techError, setTechError] = useState<string | null>(null);
   const [transcription, setTranscription] = useState<string>("");
 
-  // Audio Context Refs
   const inputAudioCtx = useRef<AudioContext | null>(null);
   const outputAudioCtx = useRef<AudioContext | null>(null);
   const nextStartTime = useRef<number>(0);
   const activeSources = useRef<Set<AudioBufferSourceNode>>(new Set());
   
-  // Session & Stream Refs
   const sessionRef = useRef<any>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const transcriptionBuffer = useRef<string>("");
 
-  const stopAllAudio = () => {
+  // Fix: Added stopAllAudio to stop any playing audio buffers when session ends or is interrupted.
+  const stopAllAudio = useCallback(() => {
     activeSources.current.forEach(source => {
       try { source.stop(); } catch (e) {}
     });
     activeSources.current.clear();
     nextStartTime.current = 0;
     setIsSpeaking(false);
-  };
+  }, []);
 
+  // Fix: Implemented disconnect to cleanup media streams, processors, and reset state.
   const disconnect = useCallback(() => {
     if (sessionRef.current) {
       sessionRef.current.close();
@@ -52,36 +53,71 @@ const App: React.FC = () => {
     setIsListening(false);
     setTranscription("");
     transcriptionBuffer.current = "";
-  }, []);
+  }, [stopAllAudio]);
 
   const handleSelectKey = async () => {
     try {
-      // Use the pre-configured window.aistudio to open the key selection dialog.
-      // Cast to any because the global interface might be conflicting with environment types.
-      await (window as any).aistudio.openSelectKey();
-      // Assume selection successful and proceed as per guidelines
-      connectToTeacher();
+      if ((window as any).aistudio?.openSelectKey) {
+        await (window as any).aistudio.openSelectKey();
+        // Guideline: Assume key selection was successful and proceed.
+        connectToTeacher();
+      } else {
+        setErrorMsg("Sistem konfigurasi tidak tersedia.");
+      }
     } catch (err) {
       console.error("Key selection failed", err);
     }
   };
 
-  const connectToTeacher = async () => {
+  // Fix: Implemented startMicStreaming to handle microphone input and stream to Live API.
+  const startMicStreaming = useCallback(async (sessionPromise: Promise<any>) => {
     try {
-      // Exclusively use process.env.API_KEY as per guidelines
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      
+      if (!inputAudioCtx.current) {
+        inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
+      }
+      
+      const source = inputAudioCtx.current.createMediaStreamSource(stream);
+      const processor = inputAudioCtx.current.createScriptProcessor(4096, 1, 1);
+      scriptProcessorRef.current = processor;
+      
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        const pcmBlob = createPcmBlob(inputData);
+        // Guideline: Solely rely on sessionPromise resolves and then call `session.sendRealtimeInput`.
+        sessionPromise.then(session => {
+          if (session) session.sendRealtimeInput({ media: pcmBlob });
+        });
+      };
+      
+      source.connect(processor);
+      processor.connect(inputAudioCtx.current.destination);
+    } catch (err) {
+      setErrorMsg("Mikrofon tidak dapat diakses.");
+      disconnect();
+    }
+  }, [disconnect]);
+
+  // Fix: Implemented connectToTeacher to initialize GoogleGenAI and connect to the Live API session.
+  const connectToTeacher = useCallback(async () => {
+    try {
+      // Guideline: The API key must be obtained exclusively from process.env.API_KEY.
       const apiKey = process.env.API_KEY || '';
       
       if (!apiKey) {
-        setErrorMsg("API Key tidak ditemukan.");
+        setErrorMsg("API Key diperlukan untuk memulai.");
         setStatus(ConnectionStatus.ERROR);
         return;
       }
 
       setErrorMsg(null);
+      setTechError(null);
       setStatus(ConnectionStatus.CONNECTING);
-      setTranscription("Menghubungi Ibu Guru...");
+      setTranscription("Inisialisasi modul...");
 
-      // Create a fresh instance right before making an API call to ensure it uses the most up-to-date API key
+      // Guideline: Create a new GoogleGenAI instance right before making an API call.
       const ai = new GoogleGenAI({ apiKey: apiKey });
       
       if (!inputAudioCtx.current) inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
@@ -98,16 +134,17 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
-          systemInstruction: 'Anda adalah Ibu Guru Smansa yang bijaksana dan hangat. Berikan penjelasan singkat namun sangat mendalam. Gunakan bahasa Indonesia yang santun. Anda berbicara langsung secara audio.'
+          systemInstruction: 'Anda adalah Asisten Guru Mini yang sangat cepat dan efisien. Berikan jawaban yang padat, akurat, dan ramah. Gunakan Bahasa Indonesia.'
         },
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
             setIsListening(true);
-            setTranscription("Halo! Saya sudah di sini. Apa yang bisa saya bantu hari ini?");
+            setTranscription("Sistem Aktif. Silakan bicara...");
             startMicStreaming(sessionPromise);
           },
           onmessage: async (message: LiveServerMessage) => {
+            // Handle output transcription
             if (message.serverContent?.outputTranscription) {
               const text = message.serverContent.outputTranscription.text;
               transcriptionBuffer.current += text;
@@ -118,199 +155,165 @@ const App: React.FC = () => {
               transcriptionBuffer.current = ""; 
             }
 
+            // Guideline: Handle audio bytes by scheduling them for playback in a queue.
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && outputAudioCtx.current) {
               const ctx = outputAudioCtx.current;
-              // Ensure gapless playback by scheduling based on nextStartTime
               nextStartTime.current = Math.max(nextStartTime.current, ctx.currentTime);
-              
               const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
               const source = ctx.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(ctx.destination);
-              
               source.addEventListener('ended', () => {
                 activeSources.current.delete(source);
                 if (activeSources.current.size === 0) setIsSpeaking(false);
               });
-
               setIsSpeaking(true);
               source.start(nextStartTime.current);
               nextStartTime.current += audioBuffer.duration;
               activeSources.current.add(source);
             }
 
+            // Handle session interruptions
             if (message.serverContent?.interrupted) {
               stopAllAudio();
-              setTranscription("(Mendengarkan Anda...)");
+              setTranscription("(Interupsi terdeteksi...)");
             }
           },
           onerror: (e: any) => {
-            console.error("Live API Error:", e);
-            if (e?.message?.includes("entity was not found") || e?.message?.includes("401") || e?.message?.includes("403")) {
-              setErrorMsg("API Key tidak valid atau tidak mendukung Live API. Gunakan API Key dari Project dengan Billing aktif.");
+            console.error("API Error:", e);
+            setStatus(ConnectionStatus.ERROR);
+            const msg = e?.message || "Koneksi gagal.";
+            setTechError(msg);
+            
+            // Guideline: Reset key selection if error indicates requested entity not found.
+            if (msg.includes("Requested entity was not found")) {
+                setErrorMsg("API Key tidak valid atau projek tidak memiliki billing.");
             } else {
-              setErrorMsg("Gagal terhubung. Pastikan region Anda mendukung Gemini Live.");
+                setErrorMsg(msg.includes("403") ? "Akses Ditolak (Perlu Billing Aktif)." : "Masalah koneksi server.");
             }
             disconnect();
           },
-          onclose: () => {
-            disconnect();
-          }
+          onclose: () => disconnect()
         }
       });
 
       sessionRef.current = await sessionPromise;
 
     } catch (err: any) {
-      console.error("Connection failed:", err);
-      setErrorMsg("Koneksi gagal. Silakan pilih API Key yang valid.");
+      console.error("Connection error:", err);
       setStatus(ConnectionStatus.ERROR);
+      setErrorMsg("Gagal memuat modul AI.");
     }
-  };
+  }, [disconnect, stopAllAudio, startMicStreaming]);
 
-  const startMicStreaming = async (sessionPromise: Promise<any>) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStreamRef.current = stream;
-
-      const source = inputAudioCtx.current!.createMediaStreamSource(stream);
-      const processor = inputAudioCtx.current!.createScriptProcessor(4096, 1, 1);
-      scriptProcessorRef.current = processor;
-
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmBlob = createPcmBlob(inputData);
-        
-        // Wait for session to be ready before sending realtime input
-        sessionPromise.then(session => {
-          if (session) session.sendRealtimeInput({ media: pcmBlob });
-        });
-      };
-
-      source.connect(processor);
-      processor.connect(inputAudioCtx.current!.destination);
-    } catch (err) {
-      setErrorMsg("Akses mikrofon ditolak.");
-      disconnect();
-    }
-  };
-
-  const handleToggle = () => {
-    if (status === ConnectionStatus.CONNECTED || status === ConnectionStatus.CONNECTING) {
+  // Fix: Added handleToggle to switch between connected and disconnected states.
+  const handleToggle = useCallback(() => {
+    if (status === ConnectionStatus.CONNECTED) {
       disconnect();
     } else {
       connectToTeacher();
     }
-  };
+  }, [status, disconnect, connectToTeacher]);
 
   return (
-    <div className="min-h-screen flex flex-col items-center bg-black text-white overflow-hidden relative font-['Plus_Jakarta_Sans']">
+    <div className="min-h-screen flex flex-col items-center bg-[#050505] text-white overflow-hidden relative font-['Plus_Jakarta_Sans']">
       <NeuralNetworkBackground />
       
-      <header className="w-full max-w-6xl px-6 py-6 flex justify-between items-center z-50">
-        <div className="flex items-center gap-3">
-          <div className="bg-gradient-to-br from-pink-600 to-rose-600 p-2 rounded-xl shadow-lg">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M10.394 2.08a1 1 0 00-.788 0l-7 3a1 1 0 000 1.84L5.25 8.051a.999.999 0 01.356-.257l4-1.714a1 1 0 11.788 1.838L7.667 9.088l1.94.831a1 1 0 00.787 0l7-3a1 1 0 000-1.838l-7-3zM3.31 9.397L5 10.12v4.102a8.969 8.969 0 00-1.05-.174 1 1 0 01-.89-.89 11.115 11.115 0 01.25-3.762zM9.3 16.573A9.026 9.026 0 007 14.935v-3.957l1.818.78a3 3 0 002.364 0l5.508-2.361a11.026 11.026 0 01.25 3.762 1 1 0 01-.89.89 8.968 8.968 0 00-5.35 2.524 1 1 0 01-1.4 0z" />
-            </svg>
+      {/* Header Minimalis */}
+      <header className="w-full max-w-6xl px-8 py-8 flex justify-between items-center z-50">
+        <div className="flex flex-col">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_10px_#3b82f6]"></div>
+            <h1 className="font-bold text-lg tracking-widest uppercase">SMANSA <span className="text-blue-500">MINI</span></h1>
           </div>
-          <h1 className="font-black text-xl tracking-tighter italic uppercase">SMANSA <span className="text-pink-500">LIVE</span></h1>
+          <span className="text-[9px] text-white/30 tracking-[0.3em] font-medium ml-4">VERSION 4.1-CORE</span>
         </div>
 
         <button 
           onClick={handleSelectKey}
-          className="px-4 py-1.5 rounded-full text-[10px] font-black tracking-widest bg-white/5 border border-white/10 hover:bg-white/10 transition-all uppercase"
+          className="group flex items-center gap-2 px-5 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all"
         >
-          Konfigurasi API
+          <div className="w-1.5 h-1.5 rounded-full bg-white/20 group-hover:bg-blue-400"></div>
+          <span className="text-[10px] font-bold tracking-widest uppercase text-white/60 group-hover:text-white">API Config</span>
         </button>
       </header>
 
-      <main className="flex-1 w-full max-w-4xl flex flex-col items-center justify-center px-4 z-10 py-4">
-        <div className="w-full bg-slate-900/40 backdrop-blur-3xl rounded-[3rem] border border-white/5 p-8 flex flex-col items-center shadow-2xl relative">
+      <main className="flex-1 w-full max-w-5xl flex flex-col items-center justify-center px-6 z-10">
+        <div className="w-full grid md:grid-cols-2 gap-12 items-center">
           
-          <TeacherAvatar 
-            isSpeaking={isSpeaking} 
-            isListening={isListening} 
-            status={status} 
-          />
-
-          <div className="mt-8 w-full max-w-xl min-h-[100px] flex items-center justify-center text-center px-6 bg-black/20 rounded-3xl border border-white/5 shadow-inner">
-            <p className={`text-sm md:text-lg font-medium leading-relaxed transition-all duration-300 ${isSpeaking ? 'text-white' : 'text-white/40 italic'}`}>
-              {transcription || (status === ConnectionStatus.CONNECTED ? "Silakan sapa Ibu Guru..." : "Menunggu sambungan...")}
-            </p>
+          {/* Sisi Kiri: Avatar */}
+          <div className="flex justify-center">
+            <TeacherAvatar isSpeaking={isSpeaking} isListening={isListening} status={status} />
           </div>
-          
-          <div className="mt-8 w-full max-w-xs space-y-4">
-            <button 
-              onClick={handleToggle} 
-              disabled={status === ConnectionStatus.CONNECTING}
-              className={`w-full py-4 font-black rounded-2xl shadow-xl active:scale-95 transition-all uppercase tracking-[0.2em] text-xs border ${
-                status === ConnectionStatus.CONNECTED
-                  ? 'bg-rose-600 text-white border-rose-500 shadow-rose-600/20'
-                  : 'bg-gradient-to-r from-pink-600 to-rose-600 text-white border-pink-500/50'
-              } disabled:opacity-50`}
-            >
-              {status === ConnectionStatus.CONNECTED ? 'Putuskan Panggilan' : 'Panggil Ibu Guru'}
-            </button>
-            
-            {errorMsg && (
-              <div className="p-5 rounded-2xl bg-rose-500/10 border border-rose-500/20 text-center animate-shake">
-                <p className="text-rose-400 text-[10px] font-black uppercase leading-tight mb-3">{errorMsg}</p>
-                <button 
-                  onClick={handleSelectKey}
-                  className="px-4 py-2 bg-rose-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-rose-500 transition-colors"
-                >
-                  Pilih Project Berbayar (Paid)
-                </button>
-                <p className="mt-2 text-[8px] text-white/30 italic leading-tight">
-                  Gemini Live membutuhkan API Key dari project Google Cloud dengan billing aktif. 
-                  Kunjungi <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline hover:text-white">ai.google.dev/gemini-api/docs/billing</a>
-                </p>
+
+          {/* Sisi Kanan: Kontrol & Teks */}
+          <div className="flex flex-col space-y-8">
+            <div className="space-y-4">
+              <div className="inline-block px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                <span className="text-[9px] font-black text-blue-400 uppercase tracking-widest">Real-time Interface</span>
               </div>
-            )}
-            
-            <div className="flex flex-col items-center gap-3">
-              <div className="flex gap-1.5 h-6 items-center">
-                {isListening && !isSpeaking && (
-                  <div className="flex gap-1">
-                    {[...Array(3)].map((_, i) => (
-                      <div key={i} className="w-2 h-2 bg-emerald-400 rounded-full animate-bounce" style={{animationDelay: `${i*0.1}s`}} />
-                    ))}
-                  </div>
-                )}
-                {isSpeaking && (
-                   <div className="flex gap-1 items-end h-5">
-                     {[...Array(8)].map((_, i) => (
-                       <div key={i} className="w-1 bg-pink-500 rounded-full animate-wave" style={{animationDelay: `${i*0.06}s`, height: '100%'}} />
-                     ))}
-                   </div>
-                )}
-              </div>
-              <p className="text-white/10 text-[7px] text-center font-black uppercase tracking-[0.6em]">
-                {status === ConnectionStatus.CONNECTED ? 'Protocol: Live Native Audio v2.5' : 'Ready to Connect'}
+              <h2 className="text-4xl font-light text-white leading-tight">
+                Diskusi Belajar <br/> <span className="font-bold">Tanpa Jeda.</span>
+              </h2>
+              <div className="h-1 w-12 bg-blue-500/50 rounded-full"></div>
+            </div>
+
+            <div className={`p-6 rounded-3xl bg-white/[0.03] border border-white/5 shadow-2xl transition-all duration-500 ${isSpeaking ? 'border-blue-500/30' : ''}`}>
+              <p className={`text-sm md:text-base leading-relaxed min-h-[80px] ${isSpeaking ? 'text-white' : 'text-white/40'}`}>
+                {transcription || "Sistem dalam keadaan standby..."}
               </p>
+            </div>
+
+            <div className="space-y-4">
+              <button 
+                onClick={handleToggle} 
+                disabled={status === ConnectionStatus.CONNECTING}
+                className={`w-full py-5 font-bold rounded-2xl transition-all active:scale-95 flex items-center justify-center gap-3 uppercase tracking-widest text-[11px] ${
+                  status === ConnectionStatus.CONNECTED
+                    ? 'bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20'
+                    : 'bg-blue-600 text-white hover:bg-blue-500 shadow-xl shadow-blue-600/20'
+                }`}
+              >
+                {status === ConnectionStatus.CONNECTED ? (
+                  <>
+                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                    Hentikan Sesi
+                  </>
+                ) : 'Mulai Percakapan'}
+              </button>
+
+              {errorMsg && (
+                <div className="p-4 rounded-xl bg-red-500/5 border border-red-500/10 text-center animate-shake">
+                  <p className="text-red-400 text-[10px] font-bold uppercase mb-2">{errorMsg}</p>
+                  <p className="text-white/20 text-[8px] font-mono truncate">{techError}</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
       </main>
 
-      <footer className="w-full py-6 text-center opacity-20 z-10">
-        <p className="text-[8px] font-black tracking-[0.8em] uppercase italic">Powered by Google Gemini Multimodal Live API</p>
+      <footer className="w-full py-10 px-10 flex justify-between items-end opacity-20 z-10">
+        <div className="space-y-1">
+          <p className="text-[8px] font-bold uppercase tracking-widest">Minimalist Engine</p>
+          <p className="text-[7px] font-medium opacity-50 uppercase tracking-[0.3em]">Latency-Optimized Architecture</p>
+        </div>
+        <p className="text-[8px] font-black uppercase tracking-widest italic">Smansa Cyber v4.1</p>
       </footer>
 
       <style>{`
         @keyframes wave {
-          0%, 100% { transform: scaleY(0.4); }
-          50% { transform: scaleY(1.4); }
+          0%, 100% { height: 20%; }
+          50% { height: 100%; }
         }
-        .animate-wave { animation: wave 0.6s ease-in-out infinite; }
+        .animate-wave { animation: wave 0.8s ease-in-out infinite; }
         @keyframes shake {
           0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-4px); }
-          75% { transform: translateX(4px); }
+          25% { transform: translateX(-2px); }
+          75% { transform: translateX(2px); }
         }
-        .animate-shake { animation: shake 0.4s ease-in-out; }
+        .animate-shake { animation: shake 0.3s ease-in-out; }
       `}</style>
     </div>
   );
