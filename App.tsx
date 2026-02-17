@@ -24,7 +24,6 @@ const App: React.FC = () => {
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const transcriptionBuffer = useRef<string>("");
 
-  // Fix: Added stopAllAudio to stop any playing audio buffers when session ends or is interrupted.
   const stopAllAudio = useCallback(() => {
     activeSources.current.forEach(source => {
       try { source.stop(); } catch (e) {}
@@ -34,7 +33,6 @@ const App: React.FC = () => {
     setIsSpeaking(false);
   }, []);
 
-  // Fix: Implemented disconnect to cleanup media streams, processors, and reset state.
   const disconnect = useCallback(() => {
     if (sessionRef.current) {
       sessionRef.current.close();
@@ -55,21 +53,6 @@ const App: React.FC = () => {
     transcriptionBuffer.current = "";
   }, [stopAllAudio]);
 
-  const handleSelectKey = async () => {
-    try {
-      if ((window as any).aistudio?.openSelectKey) {
-        await (window as any).aistudio.openSelectKey();
-        // Guideline: Assume key selection was successful and proceed.
-        connectToTeacher();
-      } else {
-        setErrorMsg("Sistem konfigurasi tidak tersedia.");
-      }
-    } catch (err) {
-      console.error("Key selection failed", err);
-    }
-  };
-
-  // Fix: Implemented startMicStreaming to handle microphone input and stream to Live API.
   const startMicStreaming = useCallback(async (sessionPromise: Promise<any>) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -86,7 +69,6 @@ const App: React.FC = () => {
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmBlob = createPcmBlob(inputData);
-        // Guideline: Solely rely on sessionPromise resolves and then call `session.sendRealtimeInput`.
         sessionPromise.then(session => {
           if (session) session.sendRealtimeInput({ media: pcmBlob });
         });
@@ -95,30 +77,20 @@ const App: React.FC = () => {
       source.connect(processor);
       processor.connect(inputAudioCtx.current.destination);
     } catch (err) {
-      setErrorMsg("Mikrofon tidak dapat diakses.");
+      setErrorMsg("Gagal mengakses mikrofon. Pastikan izin diberikan.");
       disconnect();
     }
   }, [disconnect]);
 
-  // Fix: Implemented connectToTeacher to initialize GoogleGenAI and connect to the Live API session.
   const connectToTeacher = useCallback(async () => {
     try {
-      // Guideline: The API key must be obtained exclusively from process.env.API_KEY.
-      const apiKey = process.env.API_KEY || '';
-      
-      if (!apiKey) {
-        setErrorMsg("API Key diperlukan untuk memulai.");
-        setStatus(ConnectionStatus.ERROR);
-        return;
-      }
-
       setErrorMsg(null);
       setTechError(null);
       setStatus(ConnectionStatus.CONNECTING);
-      setTranscription("Inisialisasi modul...");
+      setTranscription("Menghubungkan ke Pusat Inteligensi...");
 
-      // Guideline: Create a new GoogleGenAI instance right before making an API call.
-      const ai = new GoogleGenAI({ apiKey: apiKey });
+      // Inisialisasi langsung menggunakan API_KEY dari environment
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
       if (!inputAudioCtx.current) inputAudioCtx.current = new AudioContext({ sampleRate: 16000 });
       if (!outputAudioCtx.current) outputAudioCtx.current = new AudioContext({ sampleRate: 24000 });
@@ -134,17 +106,16 @@ const App: React.FC = () => {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           },
-          systemInstruction: 'Anda adalah Asisten Guru Mini yang sangat cepat dan efisien. Berikan jawaban yang padat, akurat, dan ramah. Gunakan Bahasa Indonesia.'
+          systemInstruction: 'Anda adalah Asisten Guru yang sangat cerdas, cepat, dan empatik. Nama Anda adalah Guru Smansa. Berikan jawaban yang mendalam namun ringkas. Gunakan Bahasa Indonesia yang sopan.'
         },
         callbacks: {
           onopen: () => {
             setStatus(ConnectionStatus.CONNECTED);
             setIsListening(true);
-            setTranscription("Sistem Aktif. Silakan bicara...");
+            setTranscription("Koneksi berhasil. Silakan bicara dengan Ibu Guru.");
             startMicStreaming(sessionPromise);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Handle output transcription
             if (message.serverContent?.outputTranscription) {
               const text = message.serverContent.outputTranscription.text;
               transcriptionBuffer.current += text;
@@ -155,7 +126,6 @@ const App: React.FC = () => {
               transcriptionBuffer.current = ""; 
             }
 
-            // Guideline: Handle audio bytes by scheduling them for playback in a queue.
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && outputAudioCtx.current) {
               const ctx = outputAudioCtx.current;
@@ -174,24 +144,17 @@ const App: React.FC = () => {
               activeSources.current.add(source);
             }
 
-            // Handle session interruptions
             if (message.serverContent?.interrupted) {
               stopAllAudio();
-              setTranscription("(Interupsi terdeteksi...)");
+              setTranscription("(Mendengarkan instruksi baru...)");
             }
           },
           onerror: (e: any) => {
             console.error("API Error:", e);
             setStatus(ConnectionStatus.ERROR);
-            const msg = e?.message || "Koneksi gagal.";
+            const msg = e?.message || "Terjadi kesalahan pada server AI.";
             setTechError(msg);
-            
-            // Guideline: Reset key selection if error indicates requested entity not found.
-            if (msg.includes("Requested entity was not found")) {
-                setErrorMsg("API Key tidak valid atau projek tidak memiliki billing.");
-            } else {
-                setErrorMsg(msg.includes("403") ? "Akses Ditolak (Perlu Billing Aktif)." : "Masalah koneksi server.");
-            }
+            setErrorMsg("Koneksi gagal. Pastikan API Key Anda valid dan memiliki kuota.");
             disconnect();
           },
           onclose: () => disconnect()
@@ -201,13 +164,12 @@ const App: React.FC = () => {
       sessionRef.current = await sessionPromise;
 
     } catch (err: any) {
-      console.error("Connection error:", err);
+      console.error("Setup error:", err);
       setStatus(ConnectionStatus.ERROR);
-      setErrorMsg("Gagal memuat modul AI.");
+      setErrorMsg("Gagal memanggil modul AI.");
     }
   }, [disconnect, stopAllAudio, startMicStreaming]);
 
-  // Fix: Added handleToggle to switch between connected and disconnected states.
   const handleToggle = useCallback(() => {
     if (status === ConnectionStatus.CONNECTED) {
       disconnect();
@@ -220,48 +182,42 @@ const App: React.FC = () => {
     <div className="min-h-screen flex flex-col items-center bg-[#050505] text-white overflow-hidden relative font-['Plus_Jakarta_Sans']">
       <NeuralNetworkBackground />
       
-      {/* Header Minimalis */}
       <header className="w-full max-w-6xl px-8 py-8 flex justify-between items-center z-50">
         <div className="flex flex-col">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse shadow-[0_0_10px_#3b82f6]"></div>
-            <h1 className="font-bold text-lg tracking-widest uppercase">SMANSA <span className="text-blue-500">MINI</span></h1>
+            <h1 className="font-bold text-lg tracking-widest uppercase">SMANSA <span className="text-blue-500">CYBER</span></h1>
           </div>
-          <span className="text-[9px] text-white/30 tracking-[0.3em] font-medium ml-4">VERSION 4.1-CORE</span>
+          <span className="text-[9px] text-white/30 tracking-[0.3em] font-medium ml-4">INTELLIGENCE NODE 4.1</span>
         </div>
-
-        <button 
-          onClick={handleSelectKey}
-          className="group flex items-center gap-2 px-5 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition-all"
-        >
-          <div className="w-1.5 h-1.5 rounded-full bg-white/20 group-hover:bg-blue-400"></div>
-          <span className="text-[10px] font-bold tracking-widest uppercase text-white/60 group-hover:text-white">API Config</span>
-        </button>
+        
+        <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10">
+          <span className="text-[9px] font-bold text-white/40 tracking-widest uppercase">
+            {status === ConnectionStatus.CONNECTED ? 'System: Online' : 'System: Ready'}
+          </span>
+        </div>
       </header>
 
       <main className="flex-1 w-full max-w-5xl flex flex-col items-center justify-center px-6 z-10">
         <div className="w-full grid md:grid-cols-2 gap-12 items-center">
           
-          {/* Sisi Kiri: Avatar */}
-          <div className="flex justify-center">
+          <div className="flex justify-center order-2 md:order-1">
             <TeacherAvatar isSpeaking={isSpeaking} isListening={isListening} status={status} />
           </div>
 
-          {/* Sisi Kanan: Kontrol & Teks */}
-          <div className="flex flex-col space-y-8">
+          <div className="flex flex-col space-y-8 order-1 md:order-2">
             <div className="space-y-4">
               <div className="inline-block px-3 py-1 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                <span className="text-[9px] font-black text-blue-400 uppercase tracking-widest">Real-time Interface</span>
+                <span className="text-[9px] font-black text-blue-400 uppercase tracking-widest">Voice-First Experience</span>
               </div>
               <h2 className="text-4xl font-light text-white leading-tight">
-                Diskusi Belajar <br/> <span className="font-bold">Tanpa Jeda.</span>
+                Belajar Interaktif <br/> <span className="font-bold">Masa Depan.</span>
               </h2>
-              <div className="h-1 w-12 bg-blue-500/50 rounded-full"></div>
             </div>
 
             <div className={`p-6 rounded-3xl bg-white/[0.03] border border-white/5 shadow-2xl transition-all duration-500 ${isSpeaking ? 'border-blue-500/30' : ''}`}>
               <p className={`text-sm md:text-base leading-relaxed min-h-[80px] ${isSpeaking ? 'text-white' : 'text-white/40'}`}>
-                {transcription || "Sistem dalam keadaan standby..."}
+                {transcription || "Klik tombol di bawah untuk mulai berdiskusi..."}
               </p>
             </div>
 
@@ -278,15 +234,22 @@ const App: React.FC = () => {
                 {status === ConnectionStatus.CONNECTED ? (
                   <>
                     <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                    Hentikan Sesi
+                    Selesaikan Sesi
                   </>
-                ) : 'Mulai Percakapan'}
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
+                    </svg>
+                    Mulai Bicara
+                  </>
+                )}
               </button>
 
               {errorMsg && (
                 <div className="p-4 rounded-xl bg-red-500/5 border border-red-500/10 text-center animate-shake">
-                  <p className="text-red-400 text-[10px] font-bold uppercase mb-2">{errorMsg}</p>
-                  <p className="text-white/20 text-[8px] font-mono truncate">{techError}</p>
+                  <p className="text-red-400 text-[10px] font-bold uppercase mb-1">{errorMsg}</p>
+                  {techError && <p className="text-white/20 text-[7px] font-mono truncate">{techError}</p>}
                 </div>
               )}
             </div>
@@ -294,12 +257,8 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      <footer className="w-full py-10 px-10 flex justify-between items-end opacity-20 z-10">
-        <div className="space-y-1">
-          <p className="text-[8px] font-bold uppercase tracking-widest">Minimalist Engine</p>
-          <p className="text-[7px] font-medium opacity-50 uppercase tracking-[0.3em]">Latency-Optimized Architecture</p>
-        </div>
-        <p className="text-[8px] font-black uppercase tracking-widest italic">Smansa Cyber v4.1</p>
+      <footer className="w-full py-8 px-10 flex justify-center opacity-20 z-10">
+        <p className="text-[8px] font-black uppercase tracking-[0.5em] italic">Smansa AI System &copy; 2024</p>
       </footer>
 
       <style>{`
